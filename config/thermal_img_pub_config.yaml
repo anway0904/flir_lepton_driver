@@ -3,4 +3,4 @@ queue_size: 10
 # (float) Image refresh rate in Hertz
 refresh_rate: 9
 # (int) colormap to apply to the 8-bit image after automatic gain control
-colorize: 2
+colorize: -1

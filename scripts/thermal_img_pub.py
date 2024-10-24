@@ -1,7 +1,7 @@
 #!/usr/bin/env python3.8
 '''
 Description: ROS node which reads from a FLIR Lepton 2.5 Thermal Imaging Module. It publishes the thermal image as a sensor_msgs/Image.msg type message to the /thermal_img topic 
-and publishes true temperature values of each pixel in hundreths of a Kelvin (centiKelvin) as a flir_lepton_driver/Tempuratures.msg type message to the /pxl_temps topic
+and publishes true temperature values of each pixel in hundreths of a Kelvin (centiKelvin) as a flir_lepton_driver/Temperatures.msg type message to the /pxl_temps topic
 Author: Jamie Flanagan
 Credit: contains code directly copied from https://github.com/groupgets/purethermal1-uvc-capture/blob/master/python/uvc-radiometry.py
 Created: 3-17-23
@@ -14,10 +14,11 @@ from uvctypes import *
 from queue import Queue
 from sensor_msgs.msg import Image, CompressedImage
 from std_msgs.msg import Header
-from flir_lepton_driver.msg import Tempuratures
+from flir_lepton_driver.msg import Temperatures
 RECORD = False  # Set to true if you want to record video
 BUF_SIZE = 10
 q = Queue(BUF_SIZE)
+
 def py_frame_callback(frame, userptr):
     array_pointer = cast(frame.contents.data, POINTER(c_uint16 * (frame.contents.width * frame.contents.height)))
     data = np.frombuffer(array_pointer.contents, dtype=np.dtype(np.uint16)).reshape(frame.contents.height, frame.contents.width)    
@@ -43,14 +44,14 @@ def raw_to_8bit(data):
 # Converts the 3D raw image data matrix into a 1D list
 def serialize_img(raw_matrix_data,dim=3):
     list_data = list()
-    for row in raw_matrix_data:
-        for pixel in row:
-            if dim<3:
-                list_data.append(pixel)
-            else:
-                for color in pixel:
-                    list_data.append(color)  
-    return list_data
+    # for row in raw_matrix_data:
+    #     for pixel in row:
+    #         if dim<3:
+    #             list_data.append(pixel)
+    #         else:
+    #             for color in pixel:
+    #                 list_data.append(color)  
+    return list(raw_matrix_data.ravel())
 
 # Converts a serialized image into a numpy ndarray
 def deserialize_img(serial_img,w,h,dim):
@@ -70,24 +71,27 @@ def deserialize_img(serial_img,w,h,dim):
 
 class LeptonThermalImage:
     def __init__(self):
-        self.height = 60
-        self.width = 80
+        self.height = 120
+        self.width = 160
         self.encoding = 'bgr8'
         self.id = 0
         self.colorize = rospy.get_param('colorize')
+
         libuvc.uvc_init(byref(ctx), 0)
         libuvc.uvc_find_device(ctx, byref(dev), PT_USB_VID, PT_USB_PID, 0)
-        libuvc.uvc_open(dev, byref(devh))
+        result = libuvc.uvc_open(dev, byref(devh))
+
         frame_formats = uvc_get_frame_formats_by_guid(devh, VS_FMT_GUID_Y16)
         libuvc.uvc_get_stream_ctrl_format_size(devh, byref(ctrl), UVC_FRAME_FORMAT_Y16,frame_formats[0].wWidth, frame_formats[0].wHeight, int(1e7 / frame_formats[0].dwDefaultFrameInterval))
         libuvc.uvc_start_streaming(devh, byref(ctrl), PTR_PY_FRAME_CALLBACK, None, 0)
+        
     
     # Reads an image from the camera and returns an Image object
     def get_img(self):
         raw_img = q.get(True,500)
-        temp_msg = Tempuratures(serialize_img(raw_img,2))
+        temp_msg = Temperatures(serialize_img(raw_img,2))
         img = raw_to_8bit(raw_img)
-        img = cv2.flip(img,0)
+        # img = cv2.flip(img, 0)
         encoding = 'mono8'
         if self.colorize > -1:
             img = cv2.applyColorMap(img,self.colorize)
@@ -98,10 +102,14 @@ class LeptonThermalImage:
             cv2.waitKey(1)
         serial_img = serialize_img(img)
         header = Header(self.id,rospy.get_rostime(),'map')
-        img_msg = Image(header,60,80,encoding,0,240,serial_img)
-        compressed_data = np.array(cv2.imencode('.png',img)[1]).tostring()
+
+        step = 3 if self.colorize > -1 else 1
+        img_msg = Image(header, self.height, self.width, encoding, 0, self.width*step, serial_img)
+
+        compressed_data = np.array(cv2.imencode('.png',img)[1]).tobytes()
         comp_msg = CompressedImage(header,'png',compressed_data)
         return temp_msg, img_msg, comp_msg
+    
     def cleanup(self):
         libuvc.uvc_stop_streaming(devh)
         libuvc.uvc_unref_device(dev)
@@ -116,17 +124,19 @@ if __name__ == '__main__':
     devh = POINTER(uvc_device_handle)()
     ctrl = uvc_stream_ctrl()
     queue_size = rospy.get_param('queue_size')
+
     if RECORD:
         cv2.namedWindow('Thermal Image',cv2.WINDOW_NORMAL)
         cv2.resizeWindow('Thermal Image',640,480)
         fourcc = cv2.VideoWriter_fourcc(*'XVID')
-        out = cv2.VideoWriter('thermal_video.avi',fourcc,9,(80, 60))
+        out = cv2.VideoWriter('thermal_video.avi',fourcc,9,(160, 120))
     try:
+        
         rospy.init_node('thermal_img')
         r = rospy.Rate(rospy.get_param('refresh_rate'))
         img_stream = LeptonThermalImage()
         img_pub = rospy.Publisher('thermal_img',Image,queue_size=queue_size)
-        temp_pub = rospy.Publisher('pxl_temps',Tempuratures,queue_size=queue_size)
+        temp_pub = rospy.Publisher('pxl_temps',Temperatures,queue_size=queue_size)
         compressed_img_pub = rospy.Publisher('compressed_thermal_img',CompressedImage,queue_size=queue_size)
         while not rospy.is_shutdown():
             temp_msg, img_msg, compressed_img_msg = img_stream.get_img()
